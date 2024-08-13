@@ -11,7 +11,6 @@ import os
 import random
 import string
 from datetime import datetime, timedelta
-from operator import itemgetter
 from queue import Empty
 from unittest.mock import Mock, patch
 
@@ -108,13 +107,15 @@ class SQSClientMock:
     def get_queue_url(self, QueueName=None):
         return self._queues[QueueName]
 
-    def send_message(self, QueueUrl=None, MessageBody=None):
+    def send_message(self, QueueUrl=None, MessageBody=None,
+                     MessageAttributes=None):
         for q in self._queues.values():
             if q.url == QueueUrl:
                 handle = ''.join(random.choice(string.ascii_lowercase) for
                                  x in range(10))
                 q.messages.append({'Body': MessageBody,
-                                   'ReceiptHandle': handle})
+                                   'ReceiptHandle': handle,
+                                   'MessageAttributes': MessageAttributes})
                 break
 
     def receive_message(self, QueueUrl=None, MaxNumberOfMessages=1,
@@ -142,7 +143,7 @@ class test_Channel:
     def handleMessageCallback(self, message):
         self.callback_message = message
 
-    def setup(self):
+    def setup_method(self):
         """Mock the back-end SQS classes"""
         # Sanity check... if SQS is None, then it did not import and we
         # cannot execute our tests.
@@ -196,7 +197,7 @@ class test_Channel:
                                    callback=self.handleMessageCallback,
                                    consumer_tag='unittest')
 
-    def teardown(self):
+    def teardown_method(self):
         # Removes QoS reserved messages so we don't restore msgs on shutdown.
         try:
             qos = self.channel._qos
@@ -458,21 +459,23 @@ class test_Channel:
         # which is already a mock thanks to `setup` above, we just need to
         # mock the async-specific methods (as test_AsyncSQSConnection does)
         async_sqs_conn = self.channel.asynsqs(self.queue_name)
-        async_sqs_conn.receive_message = Mock(name='X.receive_message')
+        async_sqs_conn.get_list = Mock(name='X.get_list')
 
         # Call key method
         self.channel._get_bulk_async(self.queue_name)
 
-        assert async_sqs_conn.receive_message.call_count == 1
-
-        args, kwargs = async_sqs_conn.receive_message.call_args
-        (q_url, ) = args
-        (number_messages, wait_time_seconds, _) = itemgetter(
-            'number_messages', 'wait_time_seconds', 'callback'
-        )(kwargs)
-        assert q_url == self.channel.sqs().get_queue_url(self.queue_name).url
-        assert number_messages == SQS.SQS_MAX_MESSAGES
-        assert wait_time_seconds == self.channel.wait_time_seconds
+        assert async_sqs_conn.get_list.call_count == 1
+        get_list_args = async_sqs_conn.get_list.call_args[0]
+        get_list_kwargs = async_sqs_conn.get_list.call_args[1]
+        assert get_list_args[0] == 'ReceiveMessage'
+        assert get_list_args[1] == {
+            'MaxNumberOfMessages': SQS.SQS_MAX_MESSAGES,
+            'AttributeName.1': 'ApproximateReceiveCount',
+            'WaitTimeSeconds': self.channel.wait_time_seconds,
+        }
+        assert get_list_args[3] == \
+            self.channel.sqs().get_queue_url(self.queue_name).url
+        assert get_list_kwargs['parent'] == self.queue_name
 
     def test_drain_events_with_empty_list(self):
         def mock_can_consume():
@@ -976,3 +979,15 @@ class test_Channel:
 
         # Assert
         mock_generate_sts_session_token.assert_not_called()
+
+    def test_message_attribute(self):
+        message = 'my test message'
+        self.producer.publish(message, message_attributes={
+            'Attribute1': {'DataType': 'String',
+                           'StringValue': 'STRING_VALUE'}
+        }
+        )
+        output_message = self.queue(self.channel).get()
+        assert message == output_message.payload
+        # It's not propogated to the properties
+        assert 'message_attributes' not in output_message.properties

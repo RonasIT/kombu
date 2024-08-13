@@ -35,7 +35,7 @@ Connection string has the following formats:
 .. code-block::
 
     azureservicebus://SAS_POLICY_NAME:SAS_KEY@SERVICE_BUSNAMESPACE
-    azureservicebus://DefaultAzureIdentity@SERVICE_BUSNAMESPACE
+    azureservicebus://DefaultAzureCredential@SERVICE_BUSNAMESPACE
     azureservicebus://ManagedIdentityCredential@SERVICE_BUSNAMESPACE
 
 Transport Options
@@ -144,16 +144,21 @@ class Channel(virtual.Channel):
     def _try_parse_connection_string(self) -> None:
         self._namespace, self._credential = Transport.parse_uri(
             self.conninfo.hostname)
+
+        if (
+            DefaultAzureCredential is not None
+            and isinstance(self._credential, DefaultAzureCredential)
+        ) or (
+            ManagedIdentityCredential is not None
+            and isinstance(self._credential, ManagedIdentityCredential)
+        ):
+            return None
+
         if ":" in self._credential:
             self._policy, self._sas_key = self._credential.split(':', 1)
 
-        # Convert
-        endpoint = 'sb://' + self._namespace
-        if not endpoint.endswith('.net'):
-            endpoint += '.servicebus.windows.net'
-
         conn_dict = {
-            'Endpoint': endpoint,
+            'Endpoint': 'sb://' + self._namespace,
             'SharedAccessKeyName': self._policy,
             'SharedAccessKey': self._sas_key,
         }
@@ -455,7 +460,8 @@ class Transport(virtual.Transport):
     can_parse_url = True
 
     @staticmethod
-    def parse_uri(uri: str) -> tuple[str, str, str]:
+    def parse_uri(uri: str) -> tuple[str, str | DefaultAzureCredential |
+                                     ManagedIdentityCredential]:
         # URL like:
         #  azureservicebus://{SAS policy name}:{SAS key}@{ServiceBus Namespace}
         # urllib parse does not work as the sas key could contain a slash
@@ -465,6 +471,9 @@ class Transport(virtual.Transport):
         uri = uri.replace('azureservicebus://', '')
         # > 'rootpolicy:some/key',  'somenamespace'
         credential, namespace = uri.rsplit('@', 1)
+
+        if not namespace.endswith('.net'):
+            namespace += '.servicebus.windows.net'
 
         if "DefaultAzureCredential".lower() == credential.lower():
             if DefaultAzureCredential is None:
@@ -496,7 +505,7 @@ class Transport(virtual.Transport):
     @classmethod
     def as_uri(cls, uri: str, include_password=False, mask='**') -> str:
         namespace, credential = cls.parse_uri(uri)
-        if ":" in credential:
+        if isinstance(credential, str) and ":" in credential:
             policy, sas_key = credential.split(':', 1)
             return 'azureservicebus://{}:{}@{}'.format(
                 policy,
@@ -505,6 +514,6 @@ class Transport(virtual.Transport):
             )
 
         return 'azureservicebus://{}@{}'.format(
-            credential,
+            credential.__class__.__name__,
             namespace
         )
